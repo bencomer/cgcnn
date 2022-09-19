@@ -350,3 +350,120 @@ class CIFData(Dataset):
         nbr_fea_idx = torch.LongTensor(nbr_fea_idx)
         target = torch.Tensor([float(target)])
         return (atom_fea, nbr_fea, nbr_fea_idx), target, cif_id
+
+
+class pymgData(Dataset):
+    """
+      replacing the cif only dataset
+    """
+    def __init__(self, structure_data, targets, max_num_nbr=12, radius=8, dmin=0, step=0.2,
+                 random_seed=123, use_cohp=False):
+        self.root_dir = '/Users/bencomer/Documents/work/cgcnn_stuff/cgcnn/cgcnn/' # fix this eventually 
+        self.max_num_nbr, self.radius = max_num_nbr, radius
+        self.targets = targets
+        self.id_prop_data = [(a,b) for a,b in zip(targets.index, targets)]
+        self.structures = structure_data
+        random.seed(random_seed)
+        random.shuffle(self.id_prop_data)
+        atom_init_file = os.path.join(self.root_dir, 'atom_init.json')
+        assert os.path.exists(atom_init_file), 'atom_init.json does not exist!'
+        self.ari = AtomCustomJSONInitializer(atom_init_file)
+        self.gdf = GaussianDistance(dmin=dmin, dmax=self.radius, step=step)
+        self.cohp = ICOHP_Estimate() 
+        self.use_cohp = use_cohp
+
+    def __len__(self):
+        return len(self.id_prop_data)
+
+    @functools.lru_cache(maxsize=None)  # Cache loaded structures
+    def __getitem__(self, idx):
+        id_, target = self.id_prop_data[idx]
+        crystal = self.structures.iloc[id_]
+        atom_fea = np.vstack([self.ari.get_atom_fea(crystal[i].specie.number)
+                              for i in range(len(crystal))])
+        atom_fea = torch.Tensor(atom_fea)
+        all_nbrs = crystal.get_all_neighbors(self.radius, include_index=True)
+        all_nbrs = [sorted(nbrs, key=lambda x: x[1]) for nbrs in all_nbrs]
+        all_syms = [a.name for a in crystal.species]
+        nbr_fea_idx, nbr_fea, sym_pairs = [], [], []
+        for sym, nbr in zip(all_syms, all_nbrs):
+            if len(nbr) < self.max_num_nbr:
+                warnings.warn('{} not find enough neighbors to build graph. '
+                              'If it happens frequently, consider increase '
+                              'radius.'.format(id_))
+                nbr_fea_idx.append(list(map(lambda x: x.index, nbr)) +
+                                   [0] * (self.max_num_nbr - len(nbr)))
+                nbr_fea.append(list(map(lambda x: x.nn_distance, nbr)) +
+                               [self.radius + 1.] * (self.max_num_nbr -
+                                                     len(nbr)))
+                sym_pairs.append(list(map(lambda x: (sym, str(x.species).rstrip('0123456789')),
+                                          nbr[:self.max_num_nbr])))
+            else:
+                nbr_fea_idx.append(list(map(lambda x: x.index,
+                                            nbr[:self.max_num_nbr])))
+                nbr_fea.append(list(map(lambda x: x.nn_distance,
+                                            nbr[:self.max_num_nbr])))
+                sym_pairs.append(list(map(lambda x: (sym,str(x.species).rstrip('0123456789')),
+                                          nbr[:self.max_num_nbr])))
+                
+        nbr_fea_idx, nbr_fea = np.array(nbr_fea_idx), np.array(nbr_fea)
+        if self.use_cohp:
+            nbr_fea = self.cohp.estimate(nbr_fea, sym_pairs)
+        else:
+            nbr_fea = self.gdf.expand(nbr_fea)
+        atom_fea = torch.Tensor(atom_fea)
+        nbr_fea = torch.Tensor(nbr_fea)
+        size = nbr_fea.shape
+        if self.use_cohp:
+            nbr_fea = nbr_fea.reshape(list(size) + [1])
+        nbr_fea_idx = torch.LongTensor(nbr_fea_idx)
+        target = torch.Tensor([float(target)])
+        return (atom_fea, nbr_fea, nbr_fea_idx), target, id_
+
+class ICOHP_Estimate(object):
+    """
+    Returns an estimate of the ICOHP from the bond length
+
+    Unit: angstrom
+    """
+    def __init__(self, var=None):
+        """
+        Parameters
+        ----------
+
+        """
+        with open('/Users/bencomer/Documents/work/cgcnn_stuff/cgcnn/cgcnn/metal_fits.json', 'r') as f:
+            self.met_fits = json.load(f) 
+        
+
+    def estimate(self, distances, bond_pairs):
+        """
+        guess ICOHP based on the bond length. Only works for
+        metal-oxygen bonds (lol)
+
+        Parameters
+        ----------
+
+        distance: np.array shape n-d array
+          A distance matrix of any shape
+
+        Returns
+        -------
+        """
+        #for bp, d in zip(bond_pairs,distances):
+        #    [self.calc_cohp(a,b) ]
+        return [[self.calc_cohp(a,b) for a,b in zip(c,d)] for c,d in zip(bond_pairs,distances)] 
+        #return np.exp(-(distances[..., np.newaxis] - self.filter)**2 /
+                      #self.var**2)
+    def calc_cohp(self, syms, distance):
+        if 'O' not in syms:
+            return 0
+        else:
+            met = [a for a in syms if a != 'O']
+            if met == []:
+                return 0
+            else:
+                met = met[0]
+                return self.met_fits[met]['slope']/distance ** 6 + self.met_fits[met]['intercept']
+
+ 

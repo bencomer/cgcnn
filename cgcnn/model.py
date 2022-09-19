@@ -58,10 +58,14 @@ class ConvLayer(nn.Module):
         # TODO will there be problems with the index zero padding?
         N, M = nbr_fea_idx.shape
         # convolution
+        #print(atom_in_fea.unsqueeze(1).expand(N, M, self.atom_fea_len))
+        #print(nbr_fea)
         atom_nbr_fea = atom_in_fea[nbr_fea_idx, :]
+        #print(atom_nbr_fea)
         total_nbr_fea = torch.cat(
             [atom_in_fea.unsqueeze(1).expand(N, M, self.atom_fea_len),
              atom_nbr_fea, nbr_fea], dim=2)
+        #print(total_nbr_fea.shape)
         total_gated_fea = self.fc_full(total_nbr_fea)
         total_gated_fea = self.bn1(total_gated_fea.view(
             -1, self.atom_fea_len*2)).view(N, M, self.atom_fea_len*2)
